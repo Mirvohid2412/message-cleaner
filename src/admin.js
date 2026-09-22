@@ -1,7 +1,7 @@
 import { Composer, InlineKeyboard, InputFile } from 'grammy';
 import { BOT_TOKEN } from './config.js';
 import { parseWordList } from './matcher.js';
-import { LIST_PATH, store } from './store.js';
+import { listPath, store } from './store.js';
 
 const PAGE_SIZE = 10;
 const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2 MB
@@ -9,8 +9,8 @@ const MAX_ENTRY_LENGTH = 100;
 
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-/** Fayl kutilayotgan holat (faqat bitta admin bor) */
-let awaitingFile = false;
+/** Fayl kutilayotgan adminlar — har bir admin uchun alohida holat */
+const awaitingFile = new Set();
 
 export const admin = new Composer();
 
@@ -20,27 +20,33 @@ const addGroupUrl = (ctx) =>
   `https://t.me/${ctx.me.username}?startgroup=true&admin=delete_messages`;
 
 function mainMenu(ctx) {
-  const groups = [...store.groups.values()];
+  const me = store.for(ctx.from.id);
+  const groups = [...me.groups.values()];
   const active = groups.filter((g) => g.active).length;
 
   const text =
     '👋 <b>Assalomu alaykum!</b>\n\n' +
-    "Bot guruhlarda ro'yxatdagi taqiqlangan so'zlar bor xabarlarni avtomatik o'chiradi.\n\n" +
-    `📄 Ro'yxat: <b>${store.list ? `${store.list.count} ta so'z` : 'yuklanmagan'}</b>\n` +
+    "Bot guruhlarda oddiy a'zolarning taqiqlangan so'z yoki reklama bor xabarlarini avtomatik o'chiradi.\n" +
+    "Reklama: havolalar va boshqa kanal/guruhning @username'i. " +
+    "Begona kanal nomidan yozilgan xabarlar ham o'chiriladi.\n" +
+    "Adminlar va guruh egasining xabarlariga tegilmaydi.\n\n" +
+    `📄 Ro'yxat: <b>${me.list ? `${me.list.count} ta so'z` : 'yuklanmagan'}</b>\n` +
     `👥 Guruhlar: <b>${groups.length} ta</b>${groups.length ? ` (faol: ${active})` : ''}`;
 
   const kb = new InlineKeyboard();
-  if (store.list) kb.text("📄 Ro'yxatni ko'rish", 'view').text("🔄 Ro'yxatni yangilash", 'upload').row();
+  if (me.list) kb.text("📄 Ro'yxatni ko'rish", 'view').text("🔄 Ro'yxatni yangilash", 'upload').row();
   else kb.text("📥 Ro'yxatni yuklash", 'upload').row();
-  if (groups.length) kb.text("👥 Guruhlarni ko'rish", 'groups:0');
+  // Guruh bo'lsa — guruhlar tugmasi (qo'shish tugmasi guruhlar sahifasida), bo'lmasa — qo'shish tugmasi
+  if (groups.length) kb.text(`👥 Guruhlar (${groups.length})`, 'groups:0');
   else kb.url("➕ Guruhga qo'shish", addGroupUrl(ctx));
 
   return { text, kb };
 }
 
-function uploadPrompt() {
+function uploadPrompt(ctx) {
+  const me = store.for(ctx.from.id);
   const text =
-    (store.list
+    (me.list
       ? "🔄 <b>Yangi ro'yxat faylini yuboring.</b>\nEski ro'yxat o'chirilib, o'rniga yangisi ishlatiladi.\n\n"
       : "📥 <b>Ro'yxat faylini yuboring.</b>\n\n") +
     'Talablar:\n' +
@@ -51,7 +57,7 @@ function uploadPrompt() {
 }
 
 function groupsView(ctx, page) {
-  const groups = [...store.groups.values()];
+  const groups = [...store.for(ctx.from.id).groups.values()];
   const pages = Math.max(1, Math.ceil(groups.length / PAGE_SIZE));
   page = Math.min(Math.max(0, page), pages - 1);
 
@@ -65,7 +71,7 @@ function groupsView(ctx, page) {
       .text(page < pages - 1 ? '▶️' : '⏺', page < pages - 1 ? `groups:${page + 1}` : 'noop')
       .row();
   }
-  kb.url("➕ Guruhga qo'shish", addGroupUrl(ctx)).row().text('⬅️ Orqaga', 'menu');
+  kb.text('⬅️ Orqaga', 'menu').row().url("➕ Guruhga qo'shish", addGroupUrl(ctx)); // eng pastda
 
   const text = groups.length
     ? `👥 <b>Guruhlar</b> (${groups.length} ta)\n\n🟢 — faol, 🔴 — faolsiz\nBoshqarish uchun guruhni tanlang.`
@@ -73,13 +79,24 @@ function groupsView(ctx, page) {
   return { text, kb };
 }
 
-function groupView(g, page) {
+function groupView(ctx, g, page) {
+  const words = g.words !== false;
+  const ads = g.ads !== false;
+  const noList = words && !store.for(ctx.from.id).list;
+
   const text =
     `👥 <b>${esc(g.title)}</b>\n\n` +
     `Holati: ${g.active ? '🟢 <b>Faol</b>' : '🔴 <b>Faolsiz</b>'}\n` +
+    `🚫 So'z filtri: ${words ? '✅ yoqilgan' : "❌ o'chirilgan"}${noList ? " (⚠️ ro'yxat yuklanmagan)" : ''}\n` +
+    `📢 Reklama filtri: ${ads ? '✅ yoqilgan' : "❌ o'chirilgan"}\n` +
     `Huquq: ${g.canDelete ? "✅ xabarlarni o'chira oladi" : "⚠️ xabarlarni o'chirish huquqi yo'q (botni admin qiling)"}`;
+  // Tugma nomi — bosilganda nima bo'lishi
   const kb = new InlineKeyboard()
     .text(g.active ? '🔴 Faolsizlantirish' : '🟢 Faollashtirish', `t:${g.id}:${page}`)
+    .row()
+    .text(words ? "🚫 So'z filtrini o'chirish" : "✅ So'z filtrini yoqish", `w:${g.id}:${page}`)
+    .row()
+    .text(ads ? "📢 Reklama filtrini o'chirish" : '✅ Reklama filtrini yoqish', `a:${g.id}:${page}`)
     .row()
     .text('⬅️ Orqaga', `groups:${page}`);
   return { text, kb };
@@ -116,64 +133,86 @@ function decode(buf) {
 // ───────────────────────── Handlerlar ─────────────────────────
 
 admin.command('start', async (ctx) => {
-  awaitingFile = false;
+  awaitingFile.delete(ctx.from.id);
   await reply(ctx, mainMenu(ctx));
 });
 
 admin.callbackQuery('menu', async (ctx) => {
-  awaitingFile = false;
+  awaitingFile.delete(ctx.from.id);
   await Promise.all([ctx.answerCallbackQuery(), show(ctx, mainMenu(ctx))]);
 });
 
 admin.callbackQuery('upload', async (ctx) => {
-  awaitingFile = true;
-  await Promise.all([ctx.answerCallbackQuery(), show(ctx, uploadPrompt())]);
+  awaitingFile.add(ctx.from.id);
+  await Promise.all([ctx.answerCallbackQuery(), show(ctx, uploadPrompt(ctx))]);
 });
 
 admin.callbackQuery('view', async (ctx) => {
-  if (!store.list) {
+  const me = store.for(ctx.from.id);
+  if (!me.list) {
     await ctx.answerCallbackQuery({ text: "Ro'yxat hali yuklanmagan", show_alert: true });
     return;
   }
   await ctx.answerCallbackQuery();
-  const caption = `📄 Joriy ro'yxat — <b>${store.list.count} ta so'z</b>`;
-  if (store.listFileId) {
+  const caption = `📄 Joriy ro'yxat — <b>${me.list.count} ta so'z</b>`;
+  if (me.listFileId) {
     try {
-      await ctx.replyWithDocument(store.listFileId, { caption, parse_mode: 'HTML' });
+      await ctx.replyWithDocument(me.listFileId, { caption, parse_mode: 'HTML' });
       return;
     } catch {
-      store.listFileId = null;
+      me.listFileId = null;
     }
   }
-  const msg = await ctx.replyWithDocument(new InputFile(LIST_PATH, 'royxat.txt'), { caption, parse_mode: 'HTML' });
-  store.listFileId = msg.document?.file_id ?? null;
+  const msg = await ctx.replyWithDocument(new InputFile(listPath(me.id), 'royxat.txt'), {
+    caption,
+    parse_mode: 'HTML',
+  });
+  me.listFileId = msg.document?.file_id ?? null;
 });
 
 admin.callbackQuery(/^groups:(\d+)$/, async (ctx) => {
-  awaitingFile = false;
+  awaitingFile.delete(ctx.from.id);
   await Promise.all([ctx.answerCallbackQuery(), show(ctx, groupsView(ctx, Number(ctx.match[1])))]);
 });
 
-admin.callbackQuery(/^([gt]):(-?\d+):(\d+)$/, async (ctx) => {
-  const [, action, id, page] = ctx.match;
-  const g = action === 't' ? store.toggleGroup(Number(id)) : store.groups.get(Number(id));
+const OPTION_KEYS = { w: 'words', a: 'ads' };
+
+function toastFor(action, g) {
+  if (action === 't') return g.active ? '🟢 Faollashtirildi' : '🔴 Faolsizlantirildi';
+  if (action === 'w') return g.words !== false ? "🚫 So'z filtri yoqildi" : "So'z filtri o'chirildi";
+  if (action === 'a') return g.ads !== false ? '📢 Reklama filtri yoqildi' : "Reklama filtri o'chirildi";
+  return undefined;
+}
+
+admin.callbackQuery(/^([gtwa]):(-?\d+):(\d+)$/, async (ctx) => {
+  const [, action, rawId, rawPage] = ctx.match;
+  const adminId = ctx.from.id;
+  const chatId = Number(rawId);
+  const page = Number(rawPage);
+
+  // groupFor / toggle* faqat shu adminning guruhini qaytaradi — boshqanikiga tegib bo'lmaydi
+  const g =
+    action === 't' ? store.toggleGroup(adminId, chatId)
+    : action === 'g' ? store.groupFor(adminId, chatId)
+    : store.toggleOption(adminId, chatId, OPTION_KEYS[action]);
   if (!g) {
     await Promise.all([
       ctx.answerCallbackQuery({ text: 'Guruh topilmadi', show_alert: true }),
-      show(ctx, groupsView(ctx, Number(page))),
+      show(ctx, groupsView(ctx, page)),
     ]);
     return;
   }
   await Promise.all([
-    ctx.answerCallbackQuery(action === 't' ? (g.active ? '🟢 Faollashtirildi' : '🔴 Faolsizlantirildi') : undefined),
-    show(ctx, groupView(g, Number(page))),
+    ctx.answerCallbackQuery(toastFor(action, g)),
+    show(ctx, groupView(ctx, g, page)),
   ]);
 });
 
 admin.callbackQuery('noop', (ctx) => ctx.answerCallbackQuery());
 
 admin.on('message', async (ctx) => {
-  if (!awaitingFile) return;
+  const adminId = ctx.from.id;
+  if (!awaitingFile.has(adminId)) return;
   const doc = ctx.message.document;
 
   if (!doc) return fail(ctx, "ro'yxat <b>.txt fayl</b> ko'rinishida yuborilishi kerak.");
@@ -218,11 +257,11 @@ admin.on('message', async (ctx) => {
   }
 
   try {
-    store.setList(entries);
+    store.setList(adminId, entries);
   } catch (e) {
     return fail(ctx, `ro'yxatni saqlab bo'lmadi (${esc(String(e?.message ?? e))}).`);
   }
-  awaitingFile = false;
+  awaitingFile.delete(adminId);
 
   let info = `✅ <b>Ro'yxat saqlandi!</b>\n\nSo'zlar soni: <b>${entries.length} ta</b>`;
   if (duplicates) info += `\nTakroriy so'zlar olib tashlandi: ${duplicates} ta`;
