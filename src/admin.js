@@ -241,7 +241,7 @@ admin.on('message', async (ctx) => {
   const text = decode(buf);
   if (text.includes('\u0000')) return fail(ctx, "fayl matnli emas. Oddiy matnli .txt fayl yuboring.");
 
-  const { entries, duplicates, invalid } = parseWordList(text);
+  const { entries, duplicates, invalid, junk } = parseWordList(text);
   if (entries.length === 0) {
     return fail(ctx, "faylda birorta ham so'z topilmadi. So'zlar vergul bilan ajratilgan bo'lishi kerak.");
   }
@@ -266,6 +266,13 @@ admin.on('message', async (ctx) => {
   let info = `✅ <b>Ro'yxat saqlandi!</b>\n\nSo'zlar soni: <b>${entries.length} ta</b>`;
   if (duplicates) info += `\nTakroriy so'zlar olib tashlandi: ${duplicates} ta`;
   if (invalid.length) info += `\nHarfsiz elementlar o'tkazib yuborildi: ${invalid.length} ta`;
+  if (junk.length) {
+    info +=
+      `\nTanib bo'lmaydigan yozuvlar o'tkazib yuborildi: <b>${junk.length} ta</b>\n` +
+      `<i>Masalan: ${esc(junk.slice(0, 3).join(', '))}</i>\n` +
+      "Yulduzcha bilan yashirilgan (<code>h***i</code>) va belgilardan iborat yozuvlar oddiy so'zlarni " +
+      "noto'g'ri o'chiradi, shuning uchun ishlatilmaydi. So'zlarni to'liq yozing.";
+  }
 
   const menu = mainMenu(ctx);
   await reply(ctx, { text: info, kb: menu.kb });

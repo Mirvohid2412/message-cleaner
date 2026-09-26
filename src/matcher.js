@@ -7,18 +7,26 @@ const APOS = new Set(["'", '`', '´', 'ʻ', 'ʼ', '‘', '’', 'ʹ', '′', 'ʽ
 const CHAR_MAP = new Map(Object.entries({
   а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'yo', ж: 'j', з: 'z', и: 'i',
   й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't',
-  у: 'u', ф: 'f', х: 'x', ц: 's', ч: 'cx', ш: 'sx', щ: 'sx', ъ: '', ы: 'i', ь: '',
-  э: 'e', ю: 'yu', я: 'ya', ў: 'o', қ: 'k', ғ: 'g', ҳ: 'x', і: 'i', ї: 'i', є: 'e',
-  ş: 'sx', ç: 'cx', ğ: 'g', ı: 'i', ö: 'o', ü: 'u', ñ: 'n', ß: 'ss',
+  у: 'u', ф: 'f', х: 'x', ц: 's', ч: 'ch', ш: 'sh', щ: 'sh', ъ: '', ы: 'i', ь: '',
+  э: 'e', ю: 'yu', я: 'ya', ў: 'o', қ: 'q', ғ: 'g', ҳ: 'h', і: 'i', ї: 'i', є: 'e',
+  ş: 'sh', ç: 'ch', ğ: 'g', ı: 'i', ö: 'o', ü: 'u', ñ: 'n', ß: 'ss',
 }));
 
 // Raqam/belgi bilan yozilgan harflar (faqat keyingi belgi harf bo'lsa almashtiriladi)
-const LEET = { 0: 'o', 1: 'i', 3: 'e', 4: 'a', 5: 's', 7: 't', 8: 'b', '@': 'a', $: 's' };
+const LEET = { 0: 'o', 1: 'i', 3: 'e', 4: 'a', 5: 's', 7: 't', 8: 'b', '@': 'a', $: 's', '!': 'i', '|': 'i' };
 
 const LETTER_RE = /\p{L}/u;
 
-// Ko'p adashtiriladigan harflar bir xil deb olinadi: h/x (ahmoq/axmoq), q/k (ahmoq/ahmok)
+// Ko'p adashtiriladigan harflar: h/x (ahmoq/axmoq), q/k (ahmoq/ahmok).
+// Bu faqat uzun so'zlarda qo'llanadi — qisqa so'zlarda bitta harf hal qiluvchi: pok / po'q, hech / xach.
 const PHONETIC = { h: 'x', q: 'k' };
+
+/** Keyingi belgi (apostroflar o'tkazib yuboriladi): "0'lib" dagi 0 ham harf deb qaraladi */
+function nextLetterish(s, i) {
+  let j = i + 1;
+  while (j < s.length && APOS.has(s[j])) j++;
+  return s[j];
+}
 
 function isLetter(c) {
   if (c === undefined) return false;
@@ -35,13 +43,16 @@ export function normalize(input) {
   for (let i = 0, len = s.length; i < len; i++) {
     const ch = s[i];
     let rep;
-    if (ch >= 'a' && ch <= 'z') rep = PHONETIC[ch] ?? ch;
+    if (ch >= 'a' && ch <= 'z') rep = ch;
     else if (APOS.has(ch)) continue;
     else if ((rep = CHAR_MAP.get(ch)) !== undefined) { /* rep tayyor */ }
-    else if (LEET[ch] !== undefined && isLetter(s[i + 1])) rep = LEET[ch];
+    // So'z ichidagi raqam/belgi harf o'rnida: "4hmoq", "kun7", "$1k"
+    else if (LEET[ch] !== undefined && (isLetter(nextLetterish(s, i)) || (last >= 'a' && last <= 'z'))) {
+      rep = LEET[ch];
+    }
     else if (ch > '\x7f') {
       const base = ch.normalize('NFD')[0];
-      rep = base >= 'a' && base <= 'z' ? PHONETIC[base] ?? base : LETTER_RE.test(ch) ? ch : ' ';
+      rep = base >= 'a' && base <= 'z' ? base : LETTER_RE.test(ch) ? ch : ' ';
     } else rep = ' ';
 
     for (let j = 0; j < rep.length; j++) {
@@ -50,6 +61,17 @@ export function normalize(input) {
     }
   }
   return last === ' ' ? out.slice(0, -1) : out;
+}
+
+/** Adashtiriladigan harflarni tenglashtiradi: uzun so'zlarni solishtirish uchun */
+export function loosen(s) {
+  let out = '';
+  let last = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = PHONETIC[s[i]] ?? s[i];
+    if (c !== last) out += (last = c);
+  }
+  return out;
 }
 
 function collapse(s) {
@@ -99,7 +121,16 @@ function distance(w, t, k, prefix) {
   return prefix ? best : prev[m];
 }
 
-const maxEdits = (len) => ((len * 3) / 10) | 0; // 70% o'xshashlik uchun ruxsat etilgan xatolar
+/**
+ * Ruxsat etilgan xatolar soni.
+ * Qisqa so'zlarda bitta xato ham butunlay boshqa so'zni beradi (uka/suka, opa/jopa,
+ * dollar/mollar), shuning uchun ular faqat aynan mos kelganda o'chiriladi.
+ */
+function maxEdits(len) {
+  if (len <= 6) return 0;
+  if (len <= 10) return 1;
+  return 2;
+}
 
 const CACHE_LIMIT = 100_000;
 
@@ -108,7 +139,8 @@ export class Matcher {
   constructor(entries) {
     this.exact = new Set();
     this.words = []; // { w, m, k }
-    this.phrases = []; // 3+ so'zli iboralar: { w, p }
+    /** 3+ so'zli iboralar, birinchi so'zi bo'yicha guruhlangan: birinchiSo'z -> [{ w, p }] */
+    this.phrases = new Map();
     this.cache = new Map();
 
     for (const raw of entries) {
@@ -119,7 +151,12 @@ export class Matcher {
       if (this.exact.has(w)) continue;
       this.exact.add(w);
       if (w.length >= 4) this.words.push({ w, m: w.length, k: maxEdits(w.length) });
-      if (parts.length >= 3) this.phrases.push({ w, p: parts.length });
+      if (parts.length >= 3) {
+        const first = collapse(parts[0]);
+        const group = this.phrases.get(first);
+        if (group) group.push({ w, p: parts.length });
+        else this.phrases.set(first, [{ w, p: parts.length }]);
+      }
     }
     this.words.sort((a, b) => a.m - b.m);
     this.size = this.exact.size;
@@ -144,11 +181,12 @@ export class Matcher {
         const k = maxEdits(n > m ? n : m);
         if (n - m <= k && m - n <= k && distance(e.w, t, k, false) <= k) { hit = true; break; }
 
-        // 2) so'z boshqa so'zning ichida (qo'shimchalar, old qo'shimchalar)
+        // 2) so'z boshqa so'zning ichida (qo'shimchalar, old qo'shimchalar).
+        //    Qisqa so'zlar uchun ishlatilmaydi: "anal" -> "analiz", "sik" -> "sikl".
         if (n > m) {
-          if (t.startsWith(e.w)) { hit = true; break; }
-          if (m >= 5 && t.includes(e.w)) { hit = true; break; }
-          if (m >= 6 && distance(e.w, t, e.k, true) <= e.k) { hit = true; break; }
+          if (m >= 5 && t.startsWith(e.w)) { hit = true; break; }
+          if (m >= 7 && t.includes(e.w)) { hit = true; break; }
+          if (m >= 9 && distance(e.w, t, e.k, true) <= e.k) { hit = true; break; }
         }
       }
     }
@@ -185,28 +223,38 @@ export class Matcher {
       if (this.checkCandidate(collapse(tokens[i] + tokens[i + 1]), 5)) return true;
     }
 
-    // 3+ so'zli iboralar
-    for (let x = 0; x < this.phrases.length; x++) {
-      const { w, p } = this.phrases[x];
-      const k = maxEdits(w.length);
-      for (let i = 0; i + p <= tokens.length; i++) {
-        const cand = collapse(tokens.slice(i, i + p).join(''));
-        if (cand.startsWith(w)) return true;
-        const kk = Math.max(k, maxEdits(cand.length));
-        if (Math.abs(cand.length - w.length) <= kk && distance(w, cand, kk, false) <= kk) return true;
+    // 3+ so'zli iboralar: faqat birinchi so'zi mos kelganlari tekshiriladi
+    if (this.phrases.size !== 0) {
+      for (let i = 0; i < tokens.length; i++) {
+        const group = this.phrases.get(tokens[i]);
+        if (group === undefined) continue;
+        for (let x = 0; x < group.length; x++) {
+          const { w, p } = group[x];
+          if (i + p > tokens.length) continue;
+          const cand = collapse(tokens.slice(i, i + p).join(''));
+          if (cand.startsWith(w)) return true;
+          const kk = Math.max(maxEdits(w.length), maxEdits(cand.length));
+          if (Math.abs(cand.length - w.length) <= kk && distance(w, cand, kk, false) <= kk) return true;
+        }
       }
     }
     return false;
   }
 }
 
+const MIN_KEY_LENGTH = 3;
+const MIN_READABLE_RATIO = 0.6;
+
 /**
  * Ro'yxat faylining matnini tahlil qiladi.
- * @returns {{ entries: string[], duplicates: number, invalid: string[] }}
+ * Yulduzcha bilan yashirilgan ("h*****i") va belgilardan tanib bo'lmaydigan yozuvlar
+ * chetlab o'tiladi — ular oddiy so'zlarni noto'g'ri o'chirishga sabab bo'ladi.
+ * @returns {{ entries: string[], duplicates: number, invalid: string[], junk: string[] }}
  */
 export function parseWordList(text) {
   const entries = [];
   const invalid = [];
+  const junk = [];
   const seen = new Set();
   let duplicates = 0;
 
@@ -215,9 +263,16 @@ export function parseWordList(text) {
     if (!entry) continue;
     const key = normalize(entry).replace(/ /g, '');
     if (!key) { invalid.push(entry); continue; }
+
+    const rawLength = entry.replace(/[\s'`´ʻʼ‘’]/g, '').length;
+    if (entry.includes('*') || key.length < MIN_KEY_LENGTH || key.length < rawLength * MIN_READABLE_RATIO) {
+      junk.push(entry);
+      continue;
+    }
+
     if (seen.has(key)) { duplicates++; continue; }
     seen.add(key);
     entries.push(entry);
   }
-  return { entries, duplicates, invalid };
+  return { entries, duplicates, invalid, junk };
 }
